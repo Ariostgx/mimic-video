@@ -7,6 +7,15 @@ import torch.nn.functional as F
 from einops import einsum
 from einops.layers.torch import Rearrange
 
+# ein notation
+
+# b - batch
+# h - heads
+# g - groups
+# n - sequence
+# i, j - sequence (source, target)
+# d - feature dimension
+
 # functions
 
 def exists(v):
