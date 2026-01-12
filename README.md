@@ -1,3 +1,5 @@
+<img src="./mimic-video.png" width="450px"></img>
+
 ## Mimic Video (wip)
 
 Implementation of [Mimic-Video](https://mimic-video.github.io/), Video-Action Models for Generalizable Robot Control Beyond VLAs
