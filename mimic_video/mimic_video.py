@@ -164,8 +164,54 @@ class SwiGLUFeedForward(Module):
 # classes
 
 class MimicVideo(Module):
-    def __init__(self):
+    def __init__(
+        self,
+        dim,
+        *,
+        dim_action = 20,
+        depth = 8,
+        dim_head = 64,
+        heads = 8,
+        expansion_factor = 4.
+    ):
         super().__init__()
 
-    def forward(self, video):
-        pass
+        # embed
+
+        self.to_action_tokens = Linear(dim_action, dim)
+
+        # transformer
+
+        layers = []
+
+        for _ in range(depth):
+            attn = Attention(dim = dim, dim_head = dim_head, heads = heads)
+
+            ff = SwiGLUFeedForward(dim = dim, expansion_factor = expansion_factor)
+
+            layers.append(ModuleList([
+                attn,
+                ff
+            ]))
+
+        self.layers = ModuleList(layers)
+
+        # predictions
+
+        self.to_pred_action_flow = nn.Sequential(
+            nn.RMSNorm(dim),
+            Linear(dim, dim_action)
+        )
+
+    def forward(self, actions):
+
+
+        tokens = self.to_action_tokens(actions)
+
+        for attn, ff in self.layers:
+            tokens = attn(tokens) + tokens
+            tokens = ff(tokens) + tokens
+
+        flow = self.to_pred_action_flow(tokens)
+
+        return flow
