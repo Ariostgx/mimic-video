@@ -210,6 +210,7 @@ class MimicVideo(Module):
         dim_video_hidden,
         dim_action = 20,
         dim_joint_state = 32,
+        proprio_mask_prob = 0.1,
         depth = 8,
         dim_head = 64,
         heads = 8,
@@ -232,9 +233,16 @@ class MimicVideo(Module):
         self.to_fourier_embed = RandomFourierEmbed(dim) # used by deepmind, its fine
         self.to_time_cond = create_mlp(dim_in = dim * 2, dim = dim_time_cond, depth = 2, activation = nn.SiLU())
 
+        # joint token related
+
         self.to_joint_state_token = Linear(dim_joint_state, dim)
-        
+
+        self.proprio_mask_prob = proprio_mask_prob
+        self.has_proprio_masking = proprio_mask_prob > 0.
+
         self.proprio_mask_token = nn.Parameter(torch.randn(dim))
+
+        # video norm
 
         self.video_hidden_norm = nn.RMSNorm(dim_video_hidden)
 
@@ -334,10 +342,15 @@ class MimicVideo(Module):
         tokens = self.to_action_tokens(noised)
 
         #  mask joint state token for proprioception masking training
-        if self.training and torch.rand(1) < 0.1: 
-            joint_state_token = repeat(self.proprio_mask_token, 'd -> b d', b=batch)
-        else:
-            joint_state_token = self.to_joint_state_token(joint_state)
+
+        joint_state_token = self.to_joint_state_token(joint_state)
+
+        if self.training and self.has_proprio_masking:
+            mask = torch.rand((batch,), device = device) < self.proprio_mask_prob
+
+            joint_state_token = einx.where('b, d, b d', mask, self.proprio_mask_token, joint_state_token)
+
+        # pack joint with action tokens
 
         tokens, inverse_pack = pack_with_inverse((joint_state_token, tokens), 'b * d')
 
