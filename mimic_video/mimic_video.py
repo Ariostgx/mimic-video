@@ -4,12 +4,16 @@ from torch.nn import Module, ModuleList, Linear
 
 import torch.nn.functional as F
 
+import einx
 from einops import einsum, rearrange
 from einops.layers.torch import Rearrange
 
 from x_mlps_pytorch import create_mlp
 
-from torch_einops_utils import pad_left_ndim
+from torch_einops_utils import (
+    pad_left_ndim,
+    align_dims_left
+)
 
 # ein notation
 
@@ -38,6 +42,28 @@ def max_neg_value(t):
 
 def l2norm(t, eps = 1e-10):
     return F.normalize(t, dim = -1, eps = eps)
+
+# time
+
+# they follow p0's research finding with the beta distribution
+# lets stick with 0 noise to 1 data instead of the reverse
+
+def default_sample_time_fn(time, s = 0.999):
+    return torch.sqrt(s - time)
+
+class RandomFourierEmbed(Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.proj = nn.Sequential(
+            Rearrange('... -> ... 1'),
+            nn.Linear(1, dim)
+        )
+
+        self.proj.requires_grad_(False)
+
+    def forward(self, times):
+        rand_proj = self.proj(times)
+        return torch.cos(2 * torch.pi * rand_proj)
 
 # adaptive rmsnorm
 
@@ -168,29 +194,57 @@ class MimicVideo(Module):
         self,
         dim,
         *,
+        dim_video_hidden,
         dim_action = 20,
         depth = 8,
         dim_head = 64,
         heads = 8,
-        expansion_factor = 4.
+        expansion_factor = 4.,
+        dim_time_cond = None,
+        sample_time_fn = None
     ):
         super().__init__()
+
+        # flow related
+
+        self.sample_time_fn = default(sample_time_fn, default_sample_time_fn)
 
         # embed
 
         self.to_action_tokens = Linear(dim_action, dim)
+
+        dim_time_cond = default(dim_time_cond, dim * 2)
+
+        self.to_time_cond = nn.Sequential(
+            RandomFourierEmbed(dim),
+            create_mlp(dim_in = dim, dim = dim_time_cond, depth = 2, activation = nn.SiLU())
+        )
+
+        self.video_hidden_norm = nn.RMSNorm(dim_video_hidden)
 
         # transformer
 
         layers = []
 
         for _ in range(depth):
+            attn_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond)
+
             attn = Attention(dim = dim, dim_head = dim_head, heads = heads)
+
+            cross_attn_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond)
+
+            cross_attn = Attention(dim = dim, dim_head = dim_head, dim_context = dim_video_hidden, heads = heads)
+
+            ff_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond)
 
             ff = SwiGLUFeedForward(dim = dim, expansion_factor = expansion_factor)
 
             layers.append(ModuleList([
+                attn_adanorm,
                 attn,
+                cross_attn_adanorm,
+                cross_attn,
+                ff_adanorm,
                 ff
             ]))
 
@@ -203,15 +257,87 @@ class MimicVideo(Module):
             Linear(dim, dim_action)
         )
 
-    def forward(self, actions):
+    def forward(
+        self,
+        actions,
+        video_hiddens, # they use layer 19 of cosmos predict, at first denoising step. that's all
+        *,
+        time = None,
+        context_mask = None,
+    ):
 
+        is_training = not exists(time)
 
-        tokens = self.to_action_tokens(actions)
+        # handle flow time conditioning
 
-        for attn, ff in self.layers:
-            tokens = attn(tokens) + tokens
-            tokens = ff(tokens) + tokens
+        if is_training:
+            batch, device = actions.shape[0], actions.device
 
-        flow = self.to_pred_action_flow(tokens)
+            time = torch.rand((batch,), device = device)
+            time = self.sample_time_fn(time)
 
-        return flow
+            noise = torch.randn_like(actions)
+            flow = actions - noise
+
+            actions, left_aligned_time = align_dims_left((actions, time))
+
+            noised = noise.lerp(actions, left_aligned_time)
+        else:
+            noised = actions
+
+        time_cond = self.to_time_cond(time)
+
+        # handle video hiddens
+
+        video_hiddens = self.video_hidden_norm(video_hiddens)
+
+        # embed
+
+        tokens = self.to_action_tokens(noised)
+
+        # transformer layers
+
+        for (
+            attn_norm,
+            attn,
+            cross_attn_norm,
+            cross_attn,
+            ff_norm,
+            ff
+        ) in self.layers:
+
+            # cross attention
+
+            residual = tokens
+
+            tokens, gate = cross_attn_norm(tokens, time_cond)
+
+            tokens = residual + cross_attn(tokens, context = video_hiddens, context_mask = context_mask) * gate
+
+            # self attention
+
+            residual = tokens
+
+            tokens, gate = attn_norm(tokens, time_cond)
+
+            tokens = residual + attn(tokens) * gate
+
+            # feedforward
+
+            residual = tokens
+
+            tokens, gate = ff_norm(tokens, time_cond)
+
+            tokens = residual + ff(tokens) * gate
+
+        # prediction
+
+        pred_flow = self.to_pred_action_flow(tokens)
+
+        if not is_training:
+            return pred_flow
+
+        # mse flow loss
+
+        flow_loss = F.mse_loss(pred_flow, flow)
+        return flow_loss
