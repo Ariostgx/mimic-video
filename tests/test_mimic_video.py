@@ -11,9 +11,14 @@ def test_mimic_video():
 
     actions = torch.randn(2, 32, 20)
 
-    loss = mimic_video(actions, video_hiddens = video_hiddens, context_mask = video_mask)
+    joint_state = torch.randn(2, 32)
+
+    forward_kwargs = dict(video_hiddens = video_hiddens, context_mask = video_mask, joint_state = joint_state)
+
+    loss = mimic_video(actions, **forward_kwargs)
 
     assert loss.numel() == 1
 
-    flow = mimic_video(actions, video_hiddens = video_hiddens, context_mask = video_mask, time = torch.tensor([0.5, 0.5]))
+    flow = mimic_video(actions, **forward_kwargs, time = torch.tensor([0.5, 0.5]))
+
     assert flow.shape == actions.shape

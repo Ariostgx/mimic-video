@@ -1,5 +1,5 @@
 import torch
-from torch import nn
+from torch import nn, cat
 from torch.nn import Module, ModuleList, Linear
 
 import torch.nn.functional as F
@@ -12,7 +12,9 @@ from x_mlps_pytorch import create_mlp
 
 from torch_einops_utils import (
     pad_left_ndim,
-    align_dims_left
+    align_dims_left,
+    pad_at_dim,
+    pack_with_inverse,
 )
 
 # ein notation
@@ -42,6 +44,14 @@ def max_neg_value(t):
 
 def l2norm(t, eps = 1e-10):
     return F.normalize(t, dim = -1, eps = eps)
+
+# token shift from Peng et al. of RWKV
+# cheap way to generate relative positions
+
+def shift_feature_dim(t):
+    x, x_shift = t.chunk(2, dim = -1)
+    x_shift = pad_at_dim(x_shift, (1, -1), dim = 1)
+    return cat((x, x_shift), dim = -1)
 
 # time
 
@@ -196,6 +206,7 @@ class MimicVideo(Module):
         *,
         dim_video_hidden,
         dim_action = 20,
+        dim_joint_state = 32,
         depth = 8,
         dim_head = 64,
         heads = 8,
@@ -219,6 +230,8 @@ class MimicVideo(Module):
             RandomFourierEmbed(dim),
             create_mlp(dim_in = dim, dim = dim_time_cond, depth = 2, activation = nn.SiLU())
         )
+
+        self.to_joint_state_token = Linear(dim_joint_state, dim)
 
         self.video_hidden_norm = nn.RMSNorm(dim_video_hidden)
 
@@ -262,6 +275,7 @@ class MimicVideo(Module):
         actions,
         video_hiddens, # they use layer 19 of cosmos predict, at first denoising step. that's all
         *,
+        joint_state,
         time = None,
         context_mask = None,
     ):
@@ -295,6 +309,10 @@ class MimicVideo(Module):
 
         tokens = self.to_action_tokens(noised)
 
+        joint_state_token = self.to_joint_state_token(joint_state)
+
+        tokens, inverse_pack = pack_with_inverse((joint_state_token, tokens), 'b * d')
+
         # transformer layers
 
         for (
@@ -322,13 +340,27 @@ class MimicVideo(Module):
 
             tokens = residual + attn(tokens) * gate
 
-            # feedforward
+            # prepare feedforward
 
             residual = tokens
 
             tokens, gate = ff_norm(tokens, time_cond)
 
+            # shift along time for action tokens for cheap relative positioning, which is better than messing with rope with such short action chunks
+
+            joint_state_token, tokens = inverse_pack(tokens)
+
+            tokens = shift_feature_dim(tokens)
+
+            tokens, _ = pack_with_inverse((joint_state_token, tokens), 'b * d')
+
+            # feedforward
+
             tokens = residual + ff(tokens) * gate
+
+        # remove joint token
+
+        _, tokens = inverse_pack(tokens)
 
         # prediction
 
