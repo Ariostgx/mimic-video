@@ -1,6 +1,6 @@
 [project]
 name = "mimic-video"
-version = "0.0.5"
+version = "0.0.6"
 description = "Mimic Video"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -37,6 +37,11 @@ Repository = "https://github.com/lucidrains/mimic-video"
 
 [project.optional-dependencies]
 examples = []
+cosmos = [
+    "diffusers>=0.32.0",
+    "transformers",
+    "accelerate",
+]
 test = [
     "pytest"
 ]

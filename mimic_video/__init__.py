@@ -1,2 +1,3 @@
 
 from mimic_video.mimic_video import MimicVideo
+from mimic_video.cosmos_predict import CosmosPredictWrapper
