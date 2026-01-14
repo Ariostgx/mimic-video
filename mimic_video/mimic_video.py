@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from torch import nn, cat, stack, is_tensor, tensor
 from torch.nn import Module, ModuleList, Linear
@@ -211,6 +213,7 @@ class MimicVideo(Module):
     def __init__(
         self,
         dim,
+        video_predict_wrapper: Module | None = None,
         *,
         dim_video_hidden,
         dim_action = 20,
@@ -225,6 +228,16 @@ class MimicVideo(Module):
         sample_time_fn = None
     ):
         super().__init__()
+
+        # dims
+
+        self.dim_action = dim_action
+        self.dim_joint_state = dim_joint_state
+        self.dim_video_hidden = dim_video_hidden
+
+        # maybe video predict
+
+        self.video_predict_wrapper = video_predict_wrapper
 
         # flow related
 
@@ -289,17 +302,30 @@ class MimicVideo(Module):
 
     def forward(
         self,
-        actions,
-        video_hiddens, # they use layer 19 of cosmos predict, at first denoising step. that's all
         *,
+        actions,
+        video = None,
+        video_hiddens = None, # they use layer 19 of cosmos predict, at first denoising step. that's all
         joint_state,
         time = None,
         time_video_denoise = 0., # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
         context_mask = None,
     ):
+        assert actions.shape[-1] == self.dim_action
+
         batch, device = actions.shape[0], actions.device
 
         is_training = not exists(time)
+
+        # handle maybe extraction of video hiddens
+
+        assert exists(video) ^ exists(video_hiddens)
+
+        if not exists(video_hiddens):
+            video_hiddens = self.video_predict_wrapper(video)
+            video_hiddens, _ = pack_with_inverse(video_hiddens, 'b * d')
+
+            assert video_hiddens.shape[-1] == self.dim_video_hidden
 
         # handle flow time conditioning
 
