@@ -215,7 +215,7 @@ class MimicVideo(Module):
         dim,
         video_predict_wrapper: Module | None = None,
         *,
-        dim_video_hidden,
+        dim_video_hidden = None,
         dim_action = 20,
         dim_joint_state = 32,
         proprio_mask_prob = 0.1,
@@ -229,15 +229,20 @@ class MimicVideo(Module):
     ):
         super().__init__()
 
+        # maybe video predict
+
+        self.video_predict_wrapper = video_predict_wrapper
+
         # dims
 
         self.dim_action = dim_action
         self.dim_joint_state = dim_joint_state
+
+        dim_video_hidden = default(dim_video_hidden, video_predict_wrapper.dim_latent if exists(video_predict_wrapper) else None)
+
+        assert exists(dim_video_hidden), f'`dim_video_hidden` must be set or `video_predict_wrapper` passed in with `dim_latent`'
+
         self.dim_video_hidden = dim_video_hidden
-
-        # maybe video predict
-
-        self.video_predict_wrapper = video_predict_wrapper
 
         # flow related
 
@@ -322,6 +327,8 @@ class MimicVideo(Module):
         assert exists(video) ^ exists(video_hiddens)
 
         if not exists(video_hiddens):
+            assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
+
             video_hiddens = self.video_predict_wrapper(video)
             video_hiddens, _ = pack_with_inverse(video_hiddens, 'b * d')
 

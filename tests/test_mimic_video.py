@@ -35,7 +35,7 @@ def test_e2e():
         tiny = True
     )
 
-    model = MimicVideo(512, video_wrapper, dim_video_hidden = video_wrapper.dim_latent)
+    model = MimicVideo(512, video_wrapper)
 
     video = torch.rand(1, 3, 3, 32, 32)
 
