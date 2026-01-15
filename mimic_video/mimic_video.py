@@ -350,7 +350,7 @@ class MimicVideo(Module):
         cache = None
 
         for time in tqdm(times, disable = disable_progress_bar):
-            pred_flow, cache = self.forward(actions = denoised, time = time, return_cache = True, **kwargs)
+            pred_flow, cache = self.forward(actions = denoised, time = time, cache = cache, return_cache = True, **kwargs)
 
             denoised = denoised + delta * pred_flow
 
@@ -480,7 +480,7 @@ class MimicVideo(Module):
 
             tokens = residual + cross_attn_out * gate
 
-            if next_cached_video_hiddens_kv:
+            if return_cache:
                 next_cached_video_hiddens_kv.append(video_kv)
 
             # self attention
