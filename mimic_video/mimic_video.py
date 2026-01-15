@@ -118,7 +118,7 @@ class AdaptiveRMSNorm(Module):
 
         adaptive_normed = normed * (scale + 1.) + shift
 
-        gate_with_bias = gate + self.ada_ln_zero_bias
+        gate_with_bias = (gate + self.ada_ln_zero_bias).sigmoid()
 
         return adaptive_normed, gate_with_bias
 
@@ -156,15 +156,20 @@ class Attention(Module):
         self,
         tokens,
         context = None,
-        context_mask = None
+        context_mask = None,
+        kv = None,
+        return_kv = False
     ):
         context = default(context, tokens)
 
         queries = self.to_queries(tokens)
-        keys, values = self.to_keys_values(context).chunk(2, dim = -1)
-
         queries = self.split_q_heads(queries)
-        keys, values = tuple(self.split_kv_heads(t) for t in (keys, values))
+
+        if not exists(kv):
+            keys, values = self.to_keys_values(context).chunk(2, dim = -1)
+            keys, values = tuple(self.split_kv_heads(t) for t in (keys, values))
+        else:
+            keys, values = kv
 
         queries = queries * self.scale
 
@@ -180,7 +185,12 @@ class Attention(Module):
 
         out = self.merge_heads(out)
 
-        return self.to_out(out)
+        out = self.to_out(out)
+
+        if not return_kv:
+            return out
+
+        return out, stack((keys, values))
 
 # feedforward
 
@@ -228,6 +238,8 @@ class MimicVideo(Module):
         sample_time_fn = None
     ):
         super().__init__()
+
+        self.depth = depth
 
         # maybe video predict
 
@@ -302,7 +314,7 @@ class MimicVideo(Module):
 
         self.to_pred_action_flow = nn.Sequential(
             nn.RMSNorm(dim),
-            Linear(dim, dim_action)
+            Linear(dim, dim_action, bias = False)
         )
 
     def forward(
@@ -311,12 +323,14 @@ class MimicVideo(Module):
         actions,
         video = None,
         video_hiddens = None, # they use layer 19 of cosmos predict, at first denoising step. that's all
+        context_mask = None,
         joint_state,
         time = None,
         time_video_denoise = 0., # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
         prompts = None,
         prompt_token_ids = None,
-        context_mask = None,
+        cache = None,
+        return_cache = False
     ):
         assert not exists(self.video_predict_wrapper) or (exists(prompts) ^ exists(prompt_token_ids))
         assert actions.shape[-1] == self.dim_action
@@ -325,17 +339,28 @@ class MimicVideo(Module):
 
         is_training = not exists(time)
 
-        # handle maybe extraction of video hiddens
+        if not exists(cache):
+            # handle maybe extraction of video hiddens
+            # only if cache is not given
 
-        assert exists(video) ^ exists(video_hiddens)
+            assert exists(video) ^ exists(video_hiddens)
 
-        if not exists(video_hiddens):
-            assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
+            if not exists(video_hiddens):
+                assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
 
-            video_hiddens = self.video_predict_wrapper(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
-            video_hiddens, _ = pack_with_inverse(video_hiddens, 'b * d')
+                video_hiddens = self.video_predict_wrapper(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
+                video_hiddens, _ = pack_with_inverse(video_hiddens, 'b * d')
 
-            assert video_hiddens.shape[-1] == self.dim_video_hidden
+                assert video_hiddens.shape[-1] == self.dim_video_hidden
+
+            # handle video hiddens
+
+            video_hiddens = self.video_hidden_norm(video_hiddens)
+
+        # handle caching
+
+        prev_cached_video_hiddens_kv = cache if exists(cache) else ((None,) * self.depth)
+        next_cached_video_hiddens_kv = []
 
         # handle flow time conditioning
 
@@ -375,10 +400,6 @@ class MimicVideo(Module):
 
         time_cond = self.to_time_cond(fourier_embed)
 
-        # handle video hiddens
-
-        video_hiddens = self.video_hidden_norm(video_hiddens)
-
         # embed
 
         tokens = self.to_action_tokens(noised)
@@ -398,14 +419,14 @@ class MimicVideo(Module):
 
         # transformer layers
 
-        for (
+        for ((
             attn_norm,
             attn,
             cross_attn_norm,
             cross_attn,
             ff_norm,
             ff
-        ) in self.layers:
+        ), cached_video_kv) in zip(self.layers, prev_cached_video_hiddens_kv):
 
             # cross attention
 
@@ -413,7 +434,12 @@ class MimicVideo(Module):
 
             tokens, gate = cross_attn_norm(tokens, time_cond)
 
-            tokens = residual + cross_attn(tokens, context = video_hiddens, context_mask = context_mask) * gate
+            cross_attn_out, video_kv = cross_attn(tokens, context = video_hiddens, context_mask = context_mask, kv = cached_video_kv, return_kv = True)
+
+            tokens = residual + cross_attn_out * gate
+
+            if next_cached_video_hiddens_kv:
+                next_cached_video_hiddens_kv.append(video_kv)
 
             # self attention
 
@@ -421,7 +447,7 @@ class MimicVideo(Module):
 
             tokens, gate = attn_norm(tokens, time_cond)
 
-            tokens = residual + attn(tokens) * gate.sigmoid()
+            tokens = residual + attn(tokens) * gate
 
             # prepare feedforward
 
@@ -439,7 +465,7 @@ class MimicVideo(Module):
 
             # feedforward
 
-            tokens = residual + ff(tokens) * gate.sigmoid()
+            tokens = residual + ff(tokens) * gate
 
         # remove joint token
 
@@ -450,9 +476,19 @@ class MimicVideo(Module):
         pred_flow = self.to_pred_action_flow(tokens)
 
         if not is_training:
-            return pred_flow
+            # flow
 
-        # mse flow loss
+            out = pred_flow
+        else:
+            # mse flow loss
 
-        flow_loss = F.mse_loss(pred_flow, flow)
-        return flow_loss
+            flow_loss = F.mse_loss(pred_flow, flow)
+
+            out = flow_loss
+
+        if not return_cache:
+            return out
+
+        # handle returning of cache
+
+        return out, next_cached_video_hiddens_kv
