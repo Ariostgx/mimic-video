@@ -69,6 +69,30 @@ def shift_feature_dim(t):
     x_shift = pad_at_dim(x_shift, (1, -1), dim = 1)
     return cat((x, x_shift), dim = -1)
 
+# action normalization
+
+class Normalizer(Module):
+    def __init__(
+        self,
+        mean,
+        std,
+        eps = 1e-6
+    ):
+        super().__init__()
+        assert (std > 0.).all(), 'std must be positive'
+        self.eps = eps
+
+        self.register_buffer('mean', mean)
+        self.register_buffer('std', std)
+
+    def normalize(self, t):
+        mean, std = self.mean, self.std
+        return (t - mean) / std.clamp_min(self.eps)
+
+    def inverse_normalize(self, t):
+        mean, std = self.mean, self.std
+        return (t * std) + mean
+
 # time
 
 # they follow p0's research finding with the beta distribution
@@ -256,7 +280,8 @@ class MimicVideo(Module):
         train_time_rtc = False,
         train_time_rtc_max_delay = None,
         num_residual_streams = 1,
-        mhc_kwargs: dict = dict()
+        mhc_kwargs: dict = dict(),
+        action_mean_std: Tensor | None = None
     ):
         super().__init__()
 
@@ -266,12 +291,21 @@ class MimicVideo(Module):
 
         self.video_predict_wrapper = video_predict_wrapper
 
-        # dims
+        # action related
 
         self.action_chunk_len = action_chunk_len
         self.dim_action = dim_action
 
         self.action_shape = (action_chunk_len, dim_action)
+
+        self.action_normalizer = None
+
+        if exists(action_mean_std):
+            assert action_mean_std.shape == (2, dim_action), f'must be in shape of (2 action_dim)'
+            self.action_normalizer = Normalizer(*action_mean_std)
+
+        # joint dim
+
         self.dim_joint_state = dim_joint_state
 
         dim_video_hidden = default(dim_video_hidden, video_predict_wrapper.dim_latent if exists(video_predict_wrapper) else None)
@@ -400,6 +434,9 @@ class MimicVideo(Module):
 
             denoised = denoised + delta * pred_flow
 
+        if exists(self.action_normalizer):
+            denoised = self.action_normalizer.inverse_normalize(denoised)
+
         return denoised
 
     def forward(
@@ -420,6 +457,9 @@ class MimicVideo(Module):
     ):
         assert not exists(self.video_predict_wrapper) or (exists(prompts) ^ exists(prompt_token_ids))
         assert actions.shape[-2:] == self.action_shape
+
+        if exists(self.action_normalizer):
+            actions = self.action_normalizer.normalize(actions)
 
         batch, device = actions.shape[0], actions.device
         orig_actions = actions
