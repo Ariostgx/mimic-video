@@ -414,28 +414,59 @@ class MimicVideo(Module):
         self,
         steps = 16,
         batch_size = 1,
+        prefix_action_chunk = None,
         disable_progress_bar = False,
         **kwargs
     ):
 
         self.eval()
 
+        inpainting = exists(prefix_action_chunk)
+
+        if inpainting:
+            prefix_len = prefix_action_chunk.shape[1]
+            assert prefix_len < self.action_chunk_len
+
+            maybe_normed_prefix = prefix_action_chunk
+
+            if exists(self.action_normalizer):
+                maybe_normed_prefix = self.action_normalizer.normalize(prefix_action_chunk)
+
+        # noise
+
         noise = torch.randn((batch_size, *self.action_shape), device = self.device)
+
+        # times
 
         times = torch.linspace(0., 1., steps + 1, device = self.device)[:-1]
         delta = 1. / steps
+
+        # denoised action starts as noise
 
         denoised = noise
 
         cache = None
 
+        # denoise
+
         for time in tqdm(times, disable = disable_progress_bar):
+
+            if inpainting:
+                denoised[:, :prefix_len] = maybe_normed_prefix
+
             pred_flow, cache = self.forward(actions = denoised, time = time, cache = cache, return_cache = True, **kwargs)
 
             denoised = denoised + delta * pred_flow
 
+        # handle action inverse norm
+
         if exists(self.action_normalizer):
             denoised = self.action_normalizer.inverse_normalize(denoised)
+
+        # final set, with unnormalized prefix, if inpainting
+
+        if inpainting:
+            denoised[:, :prefix_len] = prefix_action_chunk
 
         return denoised
 

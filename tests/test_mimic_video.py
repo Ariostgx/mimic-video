@@ -37,8 +37,10 @@ def test_mimic_video(
     assert flow.shape == actions.shape
 
 @param('num_residual_streams', (1, 4))
+@param('prev_action_chunk', (False, True))
 def test_e2e(
-    num_residual_streams
+    num_residual_streams,
+    prev_action_chunk
 ):
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
@@ -49,7 +51,11 @@ def test_e2e(
         tiny = True
     )
 
-    model = MimicVideo(512, video_wrapper, num_residual_streams = num_residual_streams)
+    model = MimicVideo(
+        512,
+        video_wrapper,
+        num_residual_streams = num_residual_streams
+    )
 
     video = torch.rand(1, 3, 3, 32, 32)
 
@@ -66,5 +72,15 @@ def test_e2e(
 
     loss.backward()
 
-    pred_actions = model.sample(video = video, joint_state = joint_state, prompts = 'pass the butter')
+    prefix_action_chunk = None
+    if prev_action_chunk:
+        prefix_action_chunk = torch.randn(1, 4, 20)
+
+    pred_actions = model.sample(
+        video = video,
+        joint_state = joint_state,
+        prompts = 'pass the butter',
+        prefix_action_chunk = prefix_action_chunk
+    )
+
     assert pred_actions.shape == (1, 32, 20)
