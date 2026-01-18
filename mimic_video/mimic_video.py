@@ -47,8 +47,21 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def identity(t):
+    return t
+
 def divisible_by(num, den):
     return (num % den) == 0
+
+# wrappers
+
+def eval_no_grad(fn):
+    def inner(*args, **kwargs):
+        with torch.no_grad():
+            fn.eval()
+            return fn(*args, **kwargs)
+
+    return inner
 
 # tensor function
 
@@ -405,6 +418,12 @@ class MimicVideo(Module):
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
+    # only action parameters
+
+    def action_parameters(self):
+        video_model_params = set(self.video_predict_wrapper.parameters()) if exists(self.video_predict_wrapper) else {}
+        return set(self.parameters()) - video_model_params
+
     @property
     def device(self):
         return self.zero.device
@@ -482,6 +501,8 @@ class MimicVideo(Module):
         time_video_denoise = 0., # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
         prompts = None,
         prompt_token_ids = None,
+        detach_video_hiddens = False,
+        no_grad_video_model_forward = False,
         cache = None,
         return_cache = False,
         return_flow = False
@@ -506,7 +527,9 @@ class MimicVideo(Module):
             if not exists(video_hiddens):
                 assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
 
-                video_hiddens = self.video_predict_wrapper(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
+                video_forward_wrap = eval_no_grad if no_grad_video_model_forward else identity
+
+                video_hiddens = video_forward_wrap(self.video_predict_wrapper)(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
 
                 video_hiddens = video_hiddens.to(self.device).float() # maybe bfloat to float32
 
@@ -515,6 +538,9 @@ class MimicVideo(Module):
                 assert video_hiddens.shape[-1] == self.dim_video_hidden
 
             # handle video hiddens
+
+            if detach_video_hiddens:
+                video_hiddens = video_hiddens.detach()
 
             video_hiddens = self.video_hidden_norm(video_hiddens)
 
