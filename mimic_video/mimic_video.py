@@ -532,15 +532,16 @@ class MimicVideo(Module):
     def forward(
         self,
         *,
-        actions,                    # (b na d)
-        joint_state,                # (b)
-        task_ids = None,            # (b)
-        advantage_ids = None,       # (b)
-        video = None,               # (b c t h w)
-        video_hiddens = None,       # (b nv dv) - they use layer 19 of cosmos predict, at first denoising step. that's all
+        actions,                        # (b na d)
+        joint_state,                    # (b)
+        task_ids = None,                # (b)
+        advantage_ids = None,           # (b)
+        dropout_advantage_ids = False,
+        video = None,                   # (b c t h w)
+        video_hiddens = None,           # (b nv dv) - they use layer 19 of cosmos predict, at first denoising step. that's all
         context_mask = None,
-        time = None,                # () | (b) | (b n)
-        time_video_denoise = 0.,    # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
+        time = None,                    # () | (b) | (b n)
+        time_video_denoise = 0.,        # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
         prompts: list[str] | None = None,
         prompt_token_ids = None,
         detach_video_hiddens = False,
@@ -679,9 +680,13 @@ class MimicVideo(Module):
             assert exists(self.advantage_embed)
 
             advantage_ids = advantage_ids + 1 # 0 for dropout
-            cfg_dropout = torch.rand_like(advantage_ids.float()) < self.advantage_cfg_dropout
 
-            advantage_ids = einx.where('b, , b', cfg_dropout, 0, advantage_ids)
+            dropout_advantage_ids = default(dropout_advantage_ids, self.training)
+
+            if dropout_advantage_ids:
+                cfg_dropout = torch.rand_like(advantage_ids.float()) < self.advantage_cfg_dropout
+
+                advantage_ids = einx.where('b, , b', cfg_dropout, 0, advantage_ids)
 
             advantage_embed = self.advantage_embed(advantage_ids)
 
