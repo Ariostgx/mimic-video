@@ -21,7 +21,8 @@ from torch_einops_utils import (
     align_dims_left,
     pad_at_dim,
     pack_with_inverse,
-    masked_mean
+    masked_mean,
+    tree_map_tensor
 )
 
 from hyper_connections.mHCv2 import get_init_and_expand_reduce_stream_functions
@@ -180,12 +181,15 @@ class Attention(Module):
         dim_head = 64,
         heads = 8,
         kv_heads = 2,
-        attn_gate_value = True
+        attn_gate_value = True,
+        norm_context = False
     ):
         super().__init__()
         dim_q_inner = dim_head * heads
         dim_kv_inner = dim_head * kv_heads
+
         dim_context = default(dim_context, dim)
+        self.context_norm = nn.RMSNorm(dim_context) if norm_context else nn.Identity()
 
         self.scale = dim_head ** -0.5
 
@@ -217,6 +221,8 @@ class Attention(Module):
         queries = self.split_q_heads(queries)
 
         if not exists(kv):
+            context = self.context_norm(context)
+
             keys, values = self.to_keys_values(context).chunk(2, dim = -1)
             keys, values = tuple(self.split_kv_heads(t) for t in (keys, values))
         else:
@@ -299,7 +305,8 @@ class MimicVideo(Module):
         action_mean_std: Tensor | None = None,
         joint_mean_std: Tensor | None = None,
         num_task_ids = 0,
-        num_advantage_ids = 0
+        num_advantage_ids = 0,
+        extracted_video_layer_indices: list[int] | None = None
     ):
         super().__init__()
 
@@ -383,7 +390,7 @@ class MimicVideo(Module):
 
             cross_attn_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond)
 
-            cross_attn = Attention(dim = dim, dim_head = dim_head, dim_context = dim_video_hidden, heads = heads)
+            cross_attn = Attention(dim = dim, dim_head = dim_head, dim_context = dim_video_hidden, heads = heads, norm_context = True)
 
             ff_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond, ada_ln_zero_bias = ada_ln_zero_bias)
 
@@ -430,6 +437,12 @@ class MimicVideo(Module):
         self.task_embed = nn.Embedding(num_task_ids, dim) if num_task_ids > 0 else None
 
         self.advantage_embed = nn.Embedding(num_advantage_ids, dim) if num_advantage_ids > 0 else None
+
+        # allow for researchers to explore beyond just one layer of pretrained
+        # we should also open up research into multiple pretrained models eventually
+
+        self.extracted_video_layer_indices = default(extracted_video_layer_indices, (0,) * depth)
+        assert len(self.extracted_video_layer_indices) == depth
 
         # aux loss and device
 
@@ -555,18 +568,17 @@ class MimicVideo(Module):
 
                 video_hiddens = video_forward_wrap(self.video_predict_wrapper)(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
 
-                video_hiddens = video_hiddens.to(self.device).float() # maybe bfloat to float32
+                video_hiddens = tree_map_tensor(lambda t: t.to(self.device).float(), video_hiddens) # maybe bfloat to float32
 
-                video_hiddens, _ = pack_with_inverse(video_hiddens, 'b * d')
-
-                assert video_hiddens.shape[-1] == self.dim_video_hidden
+                video_hiddens = tree_map_tensor(lambda t: pack_with_inverse(t, 'b * d')[0], video_hiddens)
 
             # handle video hiddens
 
             if detach_video_hiddens:
                 video_hiddens = video_hiddens.detach()
 
-            video_hiddens = self.video_hidden_norm(video_hiddens)
+            if not isinstance(video_hiddens, list):
+                video_hiddens = [video_hiddens]
 
         # handle caching
 
@@ -697,7 +709,7 @@ class MimicVideo(Module):
             maybe_ff_mhc,
             ff_norm,
             ff
-        ), cached_video_kv) in zip(self.layers, prev_cached_video_hiddens_kv):
+        ), layer_video_hidden_index, cached_video_kv) in zip(self.layers, self.extracted_video_layer_indices, prev_cached_video_hiddens_kv):
 
             # cross attention
 
@@ -705,7 +717,12 @@ class MimicVideo(Module):
 
             tokens, gate = cross_attn_norm(tokens, time_cond)
 
-            cross_attn_out, video_kv = cross_attn(tokens, context = video_hiddens, context_mask = context_mask, kv = cached_video_kv, return_kv = True)
+            layer_video_hidden = None
+
+            if exists(video_hiddens):
+                layer_video_hidden = video_hiddens[layer_video_hidden_index]
+
+            cross_attn_out, video_kv = cross_attn(tokens, context = layer_video_hidden, context_mask = context_mask, kv = cached_video_kv, return_kv = True)
 
             tokens = add_residual(cross_attn_out * gate)
 

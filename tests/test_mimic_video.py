@@ -54,23 +54,34 @@ def test_mimic_video(
 
 @param('num_residual_streams', (1, 4))
 @param('prev_action_chunk', (False, True))
+@param('cross_attend_multiple', (False, True))
 def test_e2e(
     num_residual_streams,
-    prev_action_chunk
+    prev_action_chunk,
+    cross_attend_multiple
 ):
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
 
+    if cross_attend_multiple:
+        extract_layer = [19, 20]
+        extracted_video_layer_indices = [0, 1, 1] # first layer attends to 19, second and third to 20
+    else:
+        extract_layer = 19
+        extracted_video_layer_indices = None
+
     video_wrapper = CosmosPredictWrapper(
-        extract_layer = 1,
+        extract_layer = extract_layer,
         random_weights = True,
-        tiny = True
+        tiny = True,
     )
 
     model = MimicVideo(
         512,
         video_wrapper,
-        num_residual_streams = num_residual_streams
+        num_residual_streams = num_residual_streams,
+        depth = 3,
+        extracted_video_layer_indices = extracted_video_layer_indices
     )
 
     video = torch.rand(1, 3, 3, 32, 32)

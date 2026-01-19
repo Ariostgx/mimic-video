@@ -105,14 +105,20 @@ class CosmosPredictWrapper(Module):
     def __init__(
         self,
         model_name: str = 'nvidia/Cosmos-1.0-Diffusion-7B-Video2World',
-        extract_layer: int = 19,
+        extract_layers: int | list[int] | None = None,
         random_weights: bool = False,
         tiny: bool = False,
-        normalize = lambda t: (t - 0.5) * 2.0
+        normalize = lambda t: (t - 0.5) * 2.0,
+        extract_layer: int | None = None
     ):
         super().__init__()
-        self.extract_layer = extract_layer
-        self.hook_handle = None
+        extract_layers = default(extract_layers, extract_layer)
+        extract_layers = default(extract_layers, 19)
+
+        self.extract_layers = [extract_layers] if isinstance(extract_layers, int) else extract_layers
+        self.return_list = isinstance(extract_layers, list)
+
+        self.hook_handles: list = []
         self.cached_hidden_states: list[Tensor] = []
         
         if random_weights:
@@ -157,7 +163,7 @@ class CosmosPredictWrapper(Module):
         vae_config = TINY_VAE_CONFIG if tiny else REAL_VAE_CONFIG
         t5_config_dict = TINY_T5_CONFIG if tiny else REAL_T5_CONFIG
 
-        num_layers = max(2, self.extract_layer + 1)
+        num_layers = max(2, *[layer + 1 for layer in self.extract_layers])
         if not tiny:
             num_layers = max(28, num_layers)
         
@@ -173,19 +179,25 @@ class CosmosPredictWrapper(Module):
         self.tokenizer = T5TokenizerFast.from_pretrained("google-t5/t5-small")
 
     def __del__(self):
-        if exists(self.hook_handle):
-            self.hook_handle.remove()
+        if not hasattr(self, 'hook_handles'):
+            return
+
+        for handle in self.hook_handles:
+            handle.remove()
 
     def _register_hook(self):
         assert hasattr(self.transformer, 'transformer_blocks'), 'transformer must have transformer_blocks'
-        assert len(self.transformer.transformer_blocks) > self.extract_layer, f'layer {self.extract_layer} out of bounds'
+        
+        for layer_index in self.extract_layers:
+            assert len(self.transformer.transformer_blocks) > layer_index, f'layer {layer_index} out of bounds'
 
-        target_layer = self.transformer.transformer_blocks[self.extract_layer]
+            target_layer = self.transformer.transformer_blocks[layer_index]
 
-        def hook_fn(module, inp, out):
-            self.cached_hidden_states.append(out.detach().cpu())
+            def hook_fn(module, inp, out):
+                self.cached_hidden_states.append(out.detach().cpu())
 
-        self.hook_handle = target_layer.register_forward_hook(hook_fn)
+            handle = target_layer.register_forward_hook(hook_fn)
+            self.hook_handles.append(handle)
 
     def forward(
         self,
@@ -259,11 +271,15 @@ class CosmosPredictWrapper(Module):
                 # Compute previous noisy sample
                 latents = self.scheduler.step(noise_pred, timestep, latents, return_dict = False)[0]
 
-        assert len(self.cached_hidden_states) > 0, 'hidden states not captured'
+        assert len(self.cached_hidden_states) >= len(self.extract_layers), 'hidden states not captured'
         
         # Return hidden states from the first denoising step
-        hidden = self.cached_hidden_states[0]
-        
-        assert hidden.shape[-1] == self.dim_latent, f'hidden dim mismatch: expected {self.dim_latent_hidden}, got {hidden.shape[-1]}'
-        
-        return hidden
+        hiddens = self.cached_hidden_states[:len(self.extract_layers)]
+
+        for hidden in hiddens:
+            assert hidden.shape[-1] == self.dim_latent, f'hidden dim mismatch: expected {self.dim_latent}, got {hidden.shape[-1]}'
+
+        if not self.return_list:
+            return hiddens[0]
+
+        return hiddens
