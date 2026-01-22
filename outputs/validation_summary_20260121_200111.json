@@ -1,0 +1,33 @@
+{
+  "timestamp": "20260121_200111",
+  "config": {
+    "batch_size": 1,
+    "num_frames": 3,
+    "height": 32,
+    "width": 32,
+    "action_chunk_len": 32,
+    "dim_action": 20,
+    "dim_joint_state": 32,
+    "sample_steps": 16,
+    "model_dim": 512,
+    "depth": 3,
+    "extract_layer": 1
+  },
+  "device": "cpu",
+  "output_shape": [
+    1,
+    32,
+    20
+  ],
+  "action_stats": {
+    "mean": 0.11859184503555298,
+    "std": 1.1305865049362183,
+    "min": -3.787282705307007,
+    "max": 3.127251625061035
+  },
+  "model_params": {
+    "total": 30036870,
+    "trainable": 30035846
+  },
+  "status": "SUCCESS"
+}
