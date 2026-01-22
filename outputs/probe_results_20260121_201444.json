@@ -1,0 +1,67 @@
+{
+  "timestamp": "20260121_201444",
+  "config": {
+    "batch_size": 1,
+    "num_frames": 3,
+    "height": 32,
+    "width": 32,
+    "action_chunk_len": 32,
+    "dim_action": 20,
+    "dim_joint_state": 32,
+    "total_steps": 50,
+    "probe_steps": [
+      5,
+      10,
+      15,
+      20,
+      25,
+      30,
+      35,
+      40,
+      45,
+      50
+    ],
+    "model_dim": 512,
+    "depth": 3,
+    "extract_layer": 1
+  },
+  "device": "cuda",
+  "convergence_data": {
+    "steps": [
+      5,
+      10,
+      15,
+      20,
+      25,
+      30,
+      35,
+      40,
+      45,
+      50
+    ],
+    "mse_values": [
+      0.2627253532409668,
+      0.2093120813369751,
+      0.1614401787519455,
+      0.11937802284955978,
+      0.08336466550827026,
+      0.053605496883392334,
+      0.030270827934145927,
+      0.0134958541020751,
+      0.0033821300603449345,
+      0.0
+    ]
+  },
+  "final_action_stats": {
+    "mean": 0.0822044163942337,
+    "std": 1.149314284324646,
+    "min": -2.7932913303375244,
+    "max": 4.440488338470459
+  },
+  "convergence_analysis": {
+    "initial_mse": 0.2627253532409668,
+    "final_mse": 0.0,
+    "mse_reduction_ratio": 2627253532.409668,
+    "step_90_percent_converged": 40
+  }
+}

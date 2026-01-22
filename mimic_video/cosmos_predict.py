@@ -238,12 +238,15 @@ class CosmosPredictWrapper(Module):
                 text_inputs = dict(input_ids = prompt_token_ids)
             else:
                 text_inputs = self.tokenizer(
-                    prompts, 
+                    prompts,
                     return_tensors = "pt",
                     padding = True,
                     truncation = True,
                     max_length = 512
                 )
+
+            # Move tokenized inputs to device
+            text_inputs = {k: v.to(self.device) for k, v in text_inputs.items()}
 
             encoder_hidden_states = self.text_encoder(**text_inputs).last_hidden_state
             
